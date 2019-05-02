@@ -53,18 +53,17 @@ int errClient(ConnState*);
 // at definition-time.  C99 designated initializers cover much of the same
 // surface, but I still prefer X-macros for their entensibility.
 
-// TODO I was in the middle of adding additional columns to designate state transition
-!!!!!!!!!!!!!!!!!!!
-#define EXPAND_ENUM(x,y) x,
-#define EXPAND_FUNC(x,y) y,
+#define EXPAND_ENUM(x,y,z) x,
+#define EXPAND_FUNC(x,y,z) y,
+#define EXPAND_TRAN(x,y,z) {x, z, SM_TERM, SM_ERR},
 #define STATE_TABLE(X) \
-  X(SM_INIT, initClient, SM_) \
-  X(SM_NAME, nameClient) \
-  X(SM_AUTH, authClient) \
-  X(SM_MLOG, mlogClient) \
-  X(SM_TERM, termClient) \
-  X(SM_SERV, servServer) \
-  X(SM_ERR,  errClient)
+  X(SM_INIT, initClient, SM_NAME) \
+  X(SM_NAME, nameClient, SM_AUTH) \
+  X(SM_AUTH, authClient, SM_MLOG) \
+  X(SM_MLOG, mlogClient, SM_MLOG) \
+  X(SM_TERM, termClient, SM_INIT) \
+  X(SM_SERV, servServer, SM_SERV) \
+  X(SM_ERR,  errClient,  SM_ERR)
 
 int(* ConnMachine[])(ConnState*) = {
   STATE_TABLE(EXPAND_FUNC)
@@ -75,7 +74,19 @@ typedef enum SMState {
   SM_LEN
 } SMState;
 
-int Transitions[][2] = {
+// Transition
+typedef enum SMTrans {
+  SMT_STAY,
+  SMT_NEXT,
+  SMT_CLOSE,
+  SMT_ERR,
+  SMT_LEN
+}
+
+
+int Transitions[][SMT_LEN] = {
+  STATE_TABLE(EXPAND_TRAN)
+};
 
 
 #define MAX_CLIENTS 8192
@@ -83,7 +94,7 @@ ConnState ConnTable[MAX_CLIENTS]      = {0};
 struct pollfd* PollTable[MAX_CLIENTS] = {0}; // All fd members of ConnTable
 
 int GetMsg(int fd, ConnMsg* connmsg) {
-  // Drains a given file descriptor, casting the results into a ConnMsg type 
+  // Drains a given file descriptor, casting the results into a ConnMsg type
 
 
 }
@@ -96,7 +107,7 @@ int servServer(ConnState* connstate) {
   // Note that the client implementation shouldn't create multiple connections,
   // but there is nothing stopping a rogue client from doing so.  The common
   // defense would be to stash and check addr, but we do not do this.  We could
-  // also throttle connections at auth-time based on name and a max_connections 
+  // also throttle connections at auth-time based on name and a max_connections
   // concept, but this solution is omitted here as well.
   //
   // Moreover, the server should only arrive here when the connection state is
@@ -108,11 +119,11 @@ int servServer(ConnState* connstate) {
     // TODO handle server error
   }
   ConnTable[fd].pfd.fd = fd;
-  ConnTable[fd].state = SM_INIT; 
+  ConnTable[fd].state = SM_INIT;
 
   // It should not be possible to receive a connection on a socket which had
   // state and did not clean it up.  We'll log this event in the hypothetical
-  // scenario that continued development has happened and a bug was introduced. 
+  // scenario that continued development has happened and a bug was introduced.
   if(ConnTable[fd].arg) {
     // TODO log this
     free(ConnTable[fd].arg);
@@ -194,7 +205,7 @@ int main(int argc, char** argv) {
   if(argc>1) {
     int tmp_port = atoll(argv[1]);
     if(1>tmp_port || 65535<tmp_port) {
-      printf("Port must be a valid integer between 1-65535\n");
+      printf("Port must be a positive integer less than 65535\n");
       return -1;
     }
     port = tmp_port;
