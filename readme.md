@@ -3,7 +3,8 @@
 This program implements a simple C server and corresponding Python client for
 serializing messages to a file on the server machine.
 
-## Server Implementation
+
+## Server Directions 
 
 ./server [port]
 port is an optional parameter (default: 5555), the desired TCP/IP port to bind
@@ -27,6 +28,10 @@ transaction. Transaction payloads are preceeded by a two-byte length parameter
 bytes.  Payloads are interpreted relative to the current state, so the current
 design has no need to consider payload types.
 
+The server will respond with a single-byte indicating whether the transition
+failed (-1) or succeeded (0).  It doesn't really matter, but close transactions
+are confirmed.
+
 At any state, the client may explicitly transition to a closed state by:
  * emitting a zero-byte send() (the client might not do this intentfully, e.g.,
    by calling close() on the file descriptor and allowing their kernel's TCP/IP
@@ -42,9 +47,43 @@ Messages are appended to a message log in the CWD, ./messages.log
 
 Transaction information is logged to ./transactions.log
 
-## Client Implementation
+
+## Client Directions 
 
 The client implements the sending side of the protocol discussed above.  In
 order to promote connection reuse, it also implements a connection table to
 make it easy to interact with multiple servers without having to stash the
 connection object.
+
+
+## Design Considerations
+
+This pattern is probably overkill for the nature of the exercise, but seeing as
+how FireEye is a security firm, I couldn't bring myself to knowingly
+implementing something with obvious structural deficiencies. In my experience,
+there are two kinds of error that commonly lead to security vulnerabilities, so
+took made special care to avoid those:
+ * Message deserialization buffer overflows
+ * Incomplete constraint of protocol state-machine
+
+Moreover, whenever you implement a state machine in C, it's really easy to mix
+up states-as-indices and their corresponding functions or transitions, so I pull
+out X-macros to make it easier to eyeball that relationship.
+
+The design of the protocol and the GetMsg() interface are intended to prevent
+trivial buffer-overflow issues.  I pull the length of the message right off the
+wire.  Of course, a malicious user could pad the message with additional bytes,
+which will be at the top of the buffer the next time I process a transaction,
+but the server will only interpret it in terms of the next state.
+
+I don't know that this solution will withstand really intense fuzzing or
+analysis, but I certainly tried to make it durable in that sense.
+
+
+Finally, one might note that I do something strange with forcing the recv()
+sockets into nonblocking mode.  When you're doing point-to-point IPC, this is
+generally unnecessary, but in my experience different proxy solutions can buffer
+TCP/IP sockets differently.  Notably, I've seen applications that do things like
+msglen = recv(fd, buf, BIGLEN) break under proxy if the client has two
+transactions queued and the server expects to recv() a single transaction at a
+time.
