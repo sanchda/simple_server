@@ -4,7 +4,7 @@ import struct
 class ClientError(Exception):
   pass
 
-class Client(object):
+class client(object):
   """
   Implements the client side of the server protocol.  NAME and PASS type
   transactions are handled by the client at time of initialization, allowing
@@ -42,7 +42,7 @@ class Client(object):
     if struct.unpack("<B",self.sfd.recv(1))[0]:
       raise ClientError("Server rejected PASS transaction")
 
-  def send_msg(self,msg):
+  def msg(self,msg):
     """
     Sends a message, provided the Client is connected.  If we hit an error, then
     we're probably desynchronized from the server state machine, so we

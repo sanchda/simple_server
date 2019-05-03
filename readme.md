@@ -43,26 +43,62 @@ It may also transition implicitly when the kernel's TCP timeout is triggered.
 We do nothing to suppress or encourage keepalive frames, so this behavior is
 dependent on system configuration.
 
-Messages are appended to a message log in the CWD, ./messages.log
-
-Transaction information is logged to ./transactions.log
+Messages are appended to a message log in the CWD, ./messages.log.  Certain
+transaction diagnostics are printed to stdout.
 
 
 ## Client Directions 
 
-The client implements the sending side of the protocol discussed above.  In
-order to promote connection reuse, it also implements a connection table to
-make it easy to interact with multiple servers without having to stash the
-connection object.
+The client implements the sending side of the protocol discussed above.  Usage
+is pretty simple.  Initializing a client object requires setting the username
+and password:
+
+```python
+import client
+
+myclient = client.client("MyUser", "MyPassword")
+
+```
+
+Note that the client transmits the username and password as ASCII--binary data
+is not currently supported by the client (although binary messages are supported
+by the server).
+
+Once a client has been connected, it is free to submit messages:
+```python
+myclient.msg("This is my message.  It is modestly important.")
+myclient.msg("I can send multiple messages without reconnecting.")
+
+# Oops, gotta go
+myclient.disconnect()
+
+# OK, I'm back now.
+myclient.connect()
+```
+
+The client object makes no limit on the number of independent sessions which are
+spawned.
+```python
+foo = client.client("First User", "C")
+bar = client.client("Second User", "E")
+```
+
+Finally, note that passwords are very weak.  The parity of the ordinal value of
+the first password character is all that matters.
+
 
 
 ## Design Considerations
 
-This pattern is probably overkill for the nature of the exercise, but seeing as
-how FireEye is a security firm, I couldn't bring myself to knowingly
-implementing something with obvious structural deficiencies. In my experience,
-there are two kinds of error that commonly lead to security vulnerabilities, so
-took made special care to avoid those:
+This pattern is probably overkill for the nature of the exercise, but I didn't
+feel that a quick-and-dirty solution would adequately represent my skills or
+experiences.  I hope the team finds the additional burden of parsing through a
+more complex solution worthwhile.
+
+From an ergonomics standpoint, this protocol is a bit challenging to use.  This
+is intentional, as it provided a simple way of assuring that a malicious client
+couldn't execute arbitrary transactions.  In particular, I wanted to protect
+against:
  * Message deserialization buffer overflows
  * Incomplete constraint of protocol state-machine
 
@@ -87,3 +123,8 @@ TCP/IP sockets differently.  Notably, I've seen applications that do things like
 msglen = recv(fd, buf, BIGLEN) break under proxy if the client has two
 transactions queued and the server expects to recv() a single transaction at a
 time.
+
+There is much less to be said about the client, as the server leaves the client
+code relatively trivial.  I had considered writing a C client and implementing
+the Python client that way, but that would have completely (instead of just
+mostly) obviated the client side of things
