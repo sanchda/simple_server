@@ -17,13 +17,6 @@ int fd_trans   = -1;
 /******************************************************************************\
 |                    Connection and Message Data Structures                    |
 \******************************************************************************/
-typedef enum MsgType {
-  MSG_NUL,
-  MSG_IDENT,
-  MSG_PASS,
-  MSG_LOG
-} MsgType;
-
 typedef struct ConnState {
   struct pollfd*   pfd;
   char             state;
@@ -33,9 +26,9 @@ typedef struct ConnState {
 } ConnState;
 
 typedef struct ConnMsg {
-  MsgType          type;
+  char             type;
   unsigned short   len;
-  char*            body;
+  char*            msg;
 } ConnMsg;
 
 
@@ -109,8 +102,8 @@ struct pollfd PollTable[MAX_CLIENTS] = {0};
 /******************************************************************************\
 |                        State Handler Helper Functions                        |
 \******************************************************************************/
-#define MSG_OK(fd)  send(fd, &(int){0},  1, 0);
-#define MSG_BAD(fd) send(fd, &(int){-1}, 1, 0);
+#define MSG_OK(fd)  send(fd, &(int){0},  1, MSG_NOSIGNAL);
+#define MSG_BAD(fd) send(fd, &(int){-1}, 1, MSG_NOSIGNAL);
 int GetMsg(int fd, ConnMsg* connmsg) {
   // Drains a given file descriptor, casting the results into a ConnMsg type
   // strongly assumes:
@@ -122,44 +115,44 @@ int GetMsg(int fd, ConnMsg* connmsg) {
   static char buf[BUF_MAX] = {0};  // Allocating is slower than setting a page!
   memset(buf, 0, BUF_MAX);
 
-  // Assume that connmsg is shared, so we have to scrub the pointer if it's set.
-  if(connmsg->body) {
-    free(connmsg->body);
-    connmsg->body = NULL;
+  // Cleanup if there is data from last run
+  connmsg->len = 0;
+  if(connmsg->msg) {
+    free(connmsg->msg);
+    connmsg->msg = NULL;
   }
 
-  // Get the
+  // Get the type
   while(EINTR == (n=recv(fd, &msg_state, 1, 0))) ;
-  if(!n) goto GETMSG_HANGUP;
+  if(1 != n) goto GETMSG_HANGUP;
 
   // It's possible that the client has sent the first two bytes of the header,
   // but not the third.  This would be exceedingly strange on modern systems
   // so we do not handle that case here.  But we should.
-  while(EINTR == (n=recv(fd, &msg_state, 2, 0))) ;
-  if(!n || n<2) goto GETMSG_HANGUP;
+  while(EINTR == (n=recv(fd, &msg_len, 2, 0))) ;
+  if(2 != n) goto GETMSG_HANGUP;
 
   // We now know what kind of message we have.  Zero-byte messages should have
   // zero byte payloads.  Zero-byte messages cannot have zero-byte payloads.
   // nonzero messages cannot have zero payloads.
-  if(SM_TERM == msg_state || SM_ERR == msg_state && msg_len)
-    goto GETMSG_HANGUP;
-  else if(SM_TERM != msg_state && SM_ERR != msg_state && !msg_len)
-    goto GETMSG_HANGUP;
+  switch(msg_state) {
+    case SM_TERM:
+    case SM_ERR:
+      if(msg_len) goto GETMSG_HANGUP;
+    default:
+      if(!msg_len) goto GETMSG_HANGUP;
+  }
 
 
   // Begin draining the message component.
-  connmsg->body = calloc(1, msg_len+1);
+  connmsg->msg = calloc(1, msg_len+1);
+  n = 0;
   while(0<msg_len - n) {
-    n+=(m=recv(fd, connmsg->body+n, msg_len-n, 0));
-    if(!m) {
-      // We should never receive a zero-byte return here, unless the client
-      // hung up.  If so, we have an incomplete message.  On one hand, if this
-      // was an SM_MLOG type transaction we could choose to store the
-      // partial message, under the presumption that "some data is better than
-      // no data," but for the purposes of this exercise we invalidate
-      // incomplete transactions.
-      goto GETMSG_HANGUP;
-    }
+    n+=(m=recv(fd, connmsg->msg+n, msg_len-n, 0));
+
+    // Zero-byte return means the client hung up.  Zero-byte on O_NONBLOCK gives
+    // -1.  We do not accept partial messages.
+    if(0==m) goto GETMSG_HANGUP;
   }
 
   connmsg->type = msg_state;
@@ -168,9 +161,9 @@ int GetMsg(int fd, ConnMsg* connmsg) {
 
 GETMSG_HANGUP:
   // We should only be here in the case that the socket operations are in error
-  if(connmsg->body) {
-    free(connmsg->body);
-    connmsg->body = NULL;
+  if(connmsg->msg) {
+    free(connmsg->msg);
+    connmsg->msg = NULL;
   }
   connmsg->type = SM_ERR;
   connmsg->len  = 0;
@@ -260,13 +253,15 @@ int mlogClient(ConnState* connstate) {
   // Prepare message header.  If the name contains null-bytes, obviously it'll
   // be truncated here.  We don't care (if it hurts, stop doing it).
   char header[BUF_MAX+5] = {0};
-  int n = -1;
-  snprintf(header, BUF_MAX+5, "[%s]: ", connstate->name);
+  int n;
+  n = snprintf(header, BUF_MAX+5, "[%s]: ", connstate->name);
+
+  // Write the header, the msg, and a terminating CR+LF (this is Windows!)
   while(EINTR==(n=write(fd_message, header, n))) ;
   if(0>n) goto MLOG_HANGUP;
   while(EINTR==(n=write(fd_message, connstate->arg, connstate->arg_len))) ;
   if(0>n) goto MLOG_HANGUP;
-  while(EINTR==(n=write(fd_message, "\n", connstate->arg_len))) ;
+  while(EINTR==(n=write(fd_message, "\r\n", 2))) ;
   if(0>n) goto MLOG_HANGUP;
 
   // Everything is fine.  Let the client know.
@@ -275,8 +270,8 @@ int mlogClient(ConnState* connstate) {
 
 
 MLOG_HANGUP:
-  // We have enough information to go back in the file and whiteout whatever we
-  // may have written so far, but for this solution we'll just keep the fragment
+  // We hangup on the client to let them know that something went wrong on this
+  // end and we can no longer service their messages.
   return SMT_ERR;
 }
 
@@ -345,7 +340,7 @@ int servServer(ConnState* connstate) {
 |                               Server Functions                               |
 \******************************************************************************/
 int FileInit(char* file) {
-  return open(file, O_APPEND|O_CREAT, 0644);
+  return open(file, O_WRONLY|O_APPEND|O_CREAT, 0644);
 }
 
 int ServerInit(int port) {
@@ -395,28 +390,46 @@ int ServerMainLoop(int listen_fd) {
 
     for(int fd=0; fd<MAX_CLIENTS; fd++) {
       if(POLLIN&PollTable[fd].revents) {
-        if(GetMsg(fd, &msg)) {
+printf("Received tickle on %d.  My state is %d\n", fd, ConnTable[fd].state);
+        // Proceed to read from the file descriptor.  Note that we early-exit
+        // from the first if() when it's a server listening FD, since we do not
+        // want to try to recv() the connection request
+        if(SM_SERV == ConnTable[fd].state) {
+          // We special-case the server socket(s).
+          trans = ConnMachine[ConnTable[fd].state](&ConnTable[fd]);
+          ConnTable[fd].state = Transitions[ConnTable[fd].state][trans];
+        } else if(GetMsg(fd, &msg)) {
           // Error was thrown in GetMsg!  Let the client know that there was
           // an error and disconnect.
           ConnTable[fd].state = SM_ERR;
         } else if(msg.type != ConnTable[fd].state) {
           // This is an illegal transaction!  Let the client know that there
           // was an error and disconnect.
+printf("  msg type is %d, but my type is %d\n", msg.type, ConnTable[fd].state);
           ConnTable[fd].state = SM_ERR;
         } else {
           // We're fine, process the transaction.
+printf("  msg type is %d\n", msg.type);
           msg_count++;
-          ConnTable[fd].arg     = msg.body;
+          ConnTable[fd].arg     = msg.msg;
           ConnTable[fd].arg_len = msg.len;
+printf("  msg serialized successfully.  Processing.\n");
           trans = ConnMachine[ConnTable[fd].state](&ConnTable[fd]);
           ConnTable[fd].state = Transitions[ConnTable[fd].state][trans];
+
         }
+
+        // We're done with the msg/arg, so throw it away.
+        if(msg.msg) free(msg.msg);
+        msg.msg           = NULL;
+        ConnTable[fd].arg = NULL;
 
         // If the state type is SM_TERM or SM_ERR, then we need to process that
         // before returning to the main loop
         // ASSERT:  these two transactions will close the connection and clean up
         //          the ConnState object (e.g., return it to an init state)
         if(SM_ERR == ConnTable[fd].state || SM_TERM == ConnTable[fd].state) {
+printf("  Encountered an error.  Closing.\n");
           ConnMachine[ConnTable[fd].state](&ConnTable[fd]);
         }
       } else if(POLLHUP&PollTable[fd].revents) {
