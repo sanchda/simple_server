@@ -1,3 +1,6 @@
+// This is an outrageously simple client in order to quickly validate the behavior of the server.
+// I leave it here for no particular reason, except maybe to demonstrate my knowledge of network order.
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
