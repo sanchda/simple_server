@@ -158,7 +158,7 @@ int GetMsg(int fd, ConnMsg* connmsg) {
   // It's possible that the client has sent the first two bytes of the header,
   // but not the third.  This would be exceedingly strange on modern systems
   // so we do not handle that case here.  But we should.
-  while(EINTR == (n=recv(fd, &msg_len, 2, 0))) ;
+  while(EINTR == (n=recv(fd, &msg_len, 2, 0))) ;  // could be interrupted mid-sequence...
   if(2 != n) goto GETMSG_HANGUP;
 
   // We now know what kind of message we have.  Zero-byte messages should have
@@ -174,6 +174,7 @@ int GetMsg(int fd, ConnMsg* connmsg) {
 
 
   // Begin draining the message component.
+  // TODO: protect against EINTR
   connmsg->msg = calloc(1, msg_len+1);
   n = 0;
   while(0<msg_len - n) {
@@ -369,7 +370,6 @@ int servServer(ConnState* connstate) {
 /******************************************************************************\
 |                               Server Functions                               |
 \******************************************************************************/
-
 int ServerInit(int port) {
   struct sockaddr_in sa = (struct sockaddr_in){0};
   int sockfd = -1;
@@ -478,13 +478,12 @@ int ServerMainLoop(int listen_fd) {
 /******************************************************************************\
 |                                 Entry Point                                  |
 \******************************************************************************/
-const int  default_port   = 5555;
-const char default_file[] = "messages.log";
-int rc                    = -1;
-int sfd                   = -1;  // file descriptor for sockets
-
 int main(int argc, char** argv) {
-  int port                = default_port;
+  int port                  = default_port;
+  int rc                    = -1;
+  int sfd                   = -1;  // file descriptor for sockets
+  const int  default_port   = 5555;
+  const char default_file[] = "messages.log";
   if(argc>1) {
     int tmp_port = atoll(argv[1]);
     if(1>tmp_port || 65535<tmp_port) {
