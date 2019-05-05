@@ -1,40 +1,51 @@
+#define _CRT_SECURE_NO_WARNINGS  // Only because non-prod code...
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
 #include <errno.h>
 #include <string.h>
-#include <unistd.h>
 #include <fcntl.h>
 #include <sys/types.h>
-#include <sys/socket.h>
-#include <poll.h>
 
-#include <netinet/in.h>
-#include <netinet/tcp.h>
+
+#if defined(__MINGW32__)    // If using W32-GCC
+  #include <unistd.h>
+#elif defined(_WIN32)       // Using MSVC
+  #include <winsock2.h>
+  #include <ws2tcpip.h>
+  #include <mstcpip.h>
+#else                       // Using Linux-GCC
+  #include <unistd.h>
+  #include <sys/socket.h>
+  #include <poll.h>
+  #include <netinet/in.h>
+  #include <netinet/tcp.h>
+#endif
 
 
 /******************************************************************************\
-|                              Utility Functions                               |
+|                           Utility / Compatibility                            |
 \******************************************************************************/
 int FileInit(char* file) {
-  return open(file, O_WRONLY|O_APPEND|O_CREAT, 0644);
+  return open(file, O_WRONLY | O_APPEND | O_CREAT, 0644);
 }
 
-void LogMe(int depth, const char *fmt, ...) {
+void LogMe(int depth, const char* fmt, ...) {
   va_list arg;
-  if(depth) printf("%*s", 4*depth, "");
+  if(depth) printf("%*s", 4 * depth, "");
   va_start(arg, fmt);
   vprintf(fmt, arg);
   printf("\n");
   va_end(arg);
 }
 
-char SafeRecv(int fd, void* buf, unsigned int len) {
+char SafeRecv(int fd, unsigned char* buf, unsigned int len) {
   // Returns 0 if exactly len bytes were extracted from the socket, otherwise
   // returns 1 (e.g., hangup, error, or fewer bytes)
   int recvd = 0, rv = 0;  // total received, last return value
-  while(0<len-recvd) {
-    recvd+=(rv=recv(fd, buf+recvd, len-recvd, 0));
+  while(0 < len - recvd) {
+    recvd += (rv = recv(fd, buf + recvd, len - recvd, 0));
     if(-1 == rv && EINTR == errno) continue;     // retry if interrupted
     else if(0 >= rv)               return 1;     // hangup or error
   }
@@ -43,30 +54,62 @@ char SafeRecv(int fd, void* buf, unsigned int len) {
 
 char SafeWrite(int fd, char* buf, unsigned int len) {
   int wrote = 0, rv = 0;  // total written, last return value
-  while(0<len-wrote) {
-    wrote+=(rv=write(fd, buf+wrote, len-wrote));
+  while(0 < len - wrote) {
+    wrote += (rv = write(fd, buf + wrote, len - wrote));
     if(-1 == rv && EINTR == errno) continue;
     else if(0 >= rv)               return 1;
   }
   return 0;
 }
 
+// Thanks mingw! (taken from Windows 10's winsock2.h, ymmv but these appear to
+// be stable since their introduction in Vista)
+#ifdef __MINGW32__
+  #define POLLRDNORM  0x0100
+  #define POLLRDBAND  0x0200
+  #define POLLIN      (POLLRDNORM | POLLRDBAND)
+  typedef struct pollfd {
+    SOCKET  fd;
+    SHORT   events;
+    SHORT   revents;
+  } WSAPOLLFD, * PWSAPOLLFD, FAR* LPWSAPOLLFD;
+#endif
+
+#ifdef _WIN32
+  #define MSG_NOSIGNAL 0 // Not needed on Windows
+  #define poll WSAPoll
+  #define BADSOCK (~0)   // wsock returns are unsigned
+#else
+  #define BADSOCK (-1)
+#endif
+
+char SetSocketNonBlocking(int fd) {
+  if(fd < 0) return 1;
+#ifdef _WIN32
+  return ioctlsocket(fd, FIONBIO, &(int){1});
+#else
+  int flags = 0;
+  if(-1 == (flags = fcntl(fd, F_GETFL, 0)))        return 1;
+  if(-1 == fcntl(fd, F_SETFL, O_NONBLOCK | flags)) return 1;
+  return 0;
+#endif
+}
 
 /******************************************************************************\
 |                    Connection and Message Data Structures                    |
 \******************************************************************************/
 typedef struct ConnState {
-  struct pollfd*   pfd;
+  struct pollfd* pfd;
   char             state;
   unsigned short   arg_len;
-  char*            name;
-  char*            arg;
+  char* name;
+  char* arg;
 } ConnState;
 
 typedef struct ConnMsg {
   char             type;
   unsigned short   len;
-  char*            msg;
+  char* msg;
 } ConnMsg;
 
 
@@ -107,7 +150,11 @@ In particular:
   Transitions - given a state and a transition type, return the output state
   Immediate, Talkative, Lightweight - state attributes
 */
-#define MAX_CLIENTS      64    // Easy to make higher
+#ifdef _WIN32
+  #define MAX_CLIENTS  8192
+#else
+  #define MAX_CLIENTS    64
+#endif
 #define BUF_MAX        4096
 #define LISTEN_BACKLOG 1024    // max length of listen backlog
 unsigned long msg_count = 0;   // running total of messages serviced
@@ -131,7 +178,7 @@ int fd_message = -1;           // file descriptor for message file
   X(SM_ERR,  errClient,  SM_INIT, Error, 1, 0, 0)
 
 // State handlers
-int(* ConnMachine[])(ConnState*) = {
+int(*ConnMachine[])(ConnState*) = {
   STATE_TABLE(EXPAND_FUNC)
 };
 
@@ -159,7 +206,7 @@ const int Transitions[][SMT_LEN] = {
 const char* StateNames[] = {
   STATE_TABLE(EXPAND_NAME)
 };
-const char* strconn(ConnState* connstate) {
+const char* strconn(ConnState * connstate) {
   return StateNames[connstate->state];
 }
 
@@ -187,7 +234,7 @@ const char Lightweight[] = {
 // Lookup connection state by file descriptor.  In a full-featured application,
 // this is undesirable because we may use file descriptors for other purposes
 // than serving clients.  Here, we'll use the lookup without indirection.
-ConnState ConnTable[MAX_CLIENTS]     = {0};
+ConnState ConnTable[MAX_CLIENTS]     = {0};  // Incomplete on MSVC
 struct pollfd PollTable[MAX_CLIENTS] = {0};
 
 
@@ -197,11 +244,11 @@ struct pollfd PollTable[MAX_CLIENTS] = {0};
 #define MSG_OK(fd)  send(fd, &(int){0},  1, MSG_NOSIGNAL);
 #define MSG_BAD(fd) send(fd, &(int){-1}, 1, MSG_NOSIGNAL);
 
-int GetMsg(int fd, ConnMsg* connmsg) {
+int GetMsg(int fd, ConnMsg * connmsg) {
   // Drains a given file descriptor, casting the results into a ConnMsg type
   unsigned char msg_state;
   unsigned short msg_len;
-  static char buf[BUF_MAX] = {0};  // Allocating is slower than setting a page!
+  static char buf[BUF_MAX] = { 0 };  // Allocating is slower than setting a page!
   memset(buf, 0, BUF_MAX);
 
   // Cleanup if there is data from last run
@@ -214,16 +261,16 @@ int GetMsg(int fd, ConnMsg* connmsg) {
   // Extract necessary parts of the message.  If we experience any issues, then
   // hangup the connection.
   if(SafeRecv(fd, &msg_state, 1) ||
-     SafeRecv(fd, &msg_len,   2) ||
-     !msg_len == !Lightweight[msg_state]) goto GETMSG_HANGUP;
+    SafeRecv(fd, &msg_len, 2) ||
+    !msg_len == !Lightweight[msg_state]) goto GETMSG_HANGUP;
 
   // Get the message body (if msg_len is zero, that is no-op)
-  if(0<msg_len) {
-    connmsg->msg = calloc(1, msg_len+1);
+  if(0 < msg_len) {
+    connmsg->msg = calloc(1, msg_len + 1);
     if(SafeRecv(fd, connmsg->msg, msg_len)) goto GETMSG_HANGUP;
   }
   connmsg->type = msg_state;
-  connmsg->len  = msg_len;
+  connmsg->len = msg_len;
   return 0;
 
 GETMSG_HANGUP:
@@ -232,7 +279,7 @@ GETMSG_HANGUP:
     connmsg->msg = NULL;
   }
   connmsg->type = SM_ERR;
-  connmsg->len  = 0;
+  connmsg->len = 0;
   return -1;
 }
 
@@ -244,8 +291,9 @@ char IsInvalidState(unsigned int msgState, unsigned int connState) {
   return 1;
 }
 
-void ClientCleanupHelper(ConnState* connstate) {
-  connstate->pfd->fd = -1;
+void ClientCleanupHelper(ConnState * connstate) {
+  connstate->pfd->fd     = -1;
+  connstate->pfd->events = 0;
   connstate->arg_len = 0;
   if(connstate->arg) {
     free(connstate->arg);
@@ -261,7 +309,7 @@ void ClientCleanupHelper(ConnState* connstate) {
 /******************************************************************************\
 |                           State Handler Functions                            |
 \******************************************************************************/
-int initClient(ConnState* connstate) {
+int initClient(ConnState * connstate) {
   int fd = connstate->pfd->fd;
   int flags = 0;
 
@@ -269,40 +317,36 @@ int initClient(ConnState* connstate) {
   // state and did not clean it up.  We'll log this event in the hypothetical
   // scenario that continued development has happened and a bug was introduced.
   if(ConnTable[fd].arg) {
-    LogMe(1, "Superfluous arg cleanup on %d (%s).",fd, strconn(connstate));
+    LogMe(1, "Superfluous arg cleanup on %d (%s).", fd, strconn(connstate));
     free(ConnTable[fd].arg);
     ConnTable[fd].arg = NULL;
   }
   if(ConnTable[fd].name) {
-    LogMe(1, "Superfluous name cleanup on %d (%s).",fd, strconn(connstate));
+    LogMe(1, "Superfluous name cleanup on %d (%s).", fd, strconn(connstate));
     free(ConnTable[fd].name);
     ConnTable[fd].name = NULL;
   }
 
   // Set new connection to nonblocking.
-  if(-1==(flags=fcntl(fd, F_GETFL, 0))) {
-    LogMe(1, "Error getting fcntl() status on %d.  Not doing anything.", fd);
-  }
-  if(-1==fcntl(fd, F_SETFL, O_NONBLOCK|flags)) {
-    LogMe(1, "Error setting fcntl() status on %d.  Not doing anything.", fd);
-  }
+  if(SetSocketNonBlocking(fd))
+    LogMe(1, "Error setting %d to non-blocking.  Not doing anything.", fd);
 
   return SMT_NEXT;
 }
 
-int nameClient(ConnState* connstate) {
-  if(0==connstate->arg_len || 0==connstate->arg[0]) {
+int nameClient(ConnState * connstate) {
+  if(0 == connstate->arg_len || 0 == connstate->arg[0]) {
     // Need non-null name
     return SMT_ERR;
   }
   if(connstate->name) {  // Defensively.
     LogMe(1, "Superfluous name cleanup on %d (%s).", connstate->pfd->fd,
-                                                     strconn(connstate));
+      strconn(connstate));
     free(connstate->name);
     connstate->name = NULL;
   }
 
-  connstate->name = calloc(1, 1+connstate->arg_len);
+  connstate->name = calloc(1, 1 + connstate->arg_len);
   memcpy(connstate->name, connstate->arg, connstate->arg_len);
 
   // Everything is fine, so acknowledge with client
@@ -310,30 +354,30 @@ int nameClient(ConnState* connstate) {
   return SMT_NEXT;
 }
 
-int authClient(ConnState* connstate) {
+int authClient(ConnState * connstate) {
   // Uh.  Well, we could manage a list of users and their passwords, or we could
   // just check whether the first character is odd.
-  if(0==connstate->arg_len) {
+  if(0 == connstate->arg_len) {
     // Can't have null passwords
     return SMT_ERR;
   }
 
-  if(!connstate->arg[0]&1) return SMT_ERR;       // nope!
+  if(!(connstate->arg[0] & 1)) return SMT_ERR;       // nope!
   MSG_OK(connstate->pfd->fd);
-  return connstate->arg[0]&1 ? SMT_NEXT : SM_ERR;
+  return connstate->arg[0] & 1 ? SMT_NEXT : SM_ERR;
 }
 
-int mlogClient(ConnState* connstate) {
-  if(0==connstate->arg_len) return SMT_ERR;  // no null messages.
+int mlogClient(ConnState * connstate) {
+  if(0 == connstate->arg_len) return SMT_ERR;  // no null messages.
 
   // Prepare message header. Names may be truncated if they contain nulls. (or
   // display in a weird way)
-  char header[BUF_MAX+5] = {0};
+  char header[BUF_MAX + 5] = { 0 };
   int n;
-  n = snprintf(header, BUF_MAX+5, "[%s]: ", connstate->name);
+  n = snprintf(header, BUF_MAX + 5, "[%s]: ", connstate->name);
 
   // Write the header, the msg, and a terminating CR+LF (this is Windows!)
-  if(SafeWrite(fd_message, header, n)                          ||
+  if(SafeWrite(fd_message, header, n) ||
      SafeWrite(fd_message, connstate->arg, connstate->arg_len) ||
      SafeWrite(fd_message, "\r\n", 2)) goto MLOG_HANGUP;
 
@@ -346,7 +390,7 @@ MLOG_HANGUP:
   return SMT_ERR;
 }
 
-int termClient(ConnState* connstate) {
+int termClient(ConnState * connstate) {
   MSG_OK(connstate->pfd->fd);
   close(connstate->pfd->fd);
   ClientCleanupHelper(connstate);
@@ -354,25 +398,31 @@ int termClient(ConnState* connstate) {
   return SMT_NEXT;
 }
 
-int errClient(ConnState* connstate) {
+int errClient(ConnState * connstate) {
   MSG_BAD(connstate->pfd->fd);
+#ifdef _WIN32
+  closesocket(connstate->pfd->fd);
+#else
   close(connstate->pfd->fd);
+#endif
   ClientCleanupHelper(connstate);
   return SMT_NEXT;
 }
 
-int servServer(ConnState* connstate) {
+int servServer(ConnState * connstate) {
   int fd = -1, flags = 0;
   SMTrans trans;
   fd = accept(connstate->pfd->fd, NULL, NULL);
-  if(-1==fd) {
-    LogMe(0, "Error on accept().  Not doing anything.");
-  } else if(MAX_CLIENTS<=fd) {
-    LogMe(0, "Client limit hit!  Requested fd: %d, max: %d", fd, MAX_CLIENTS);
+  if(BADSOCK == fd) {
+    LogMe(1, "Error on accept().  Not doing anything.");
+  }
+  else if(MAX_CLIENTS <= fd) {
+    LogMe(1, "Client limit hit!  Requested fd: %d, max: %d", fd, MAX_CLIENTS);
     close(fd);
   }
 
-  ConnTable[fd].pfd->fd = fd;
+  ConnTable[fd].pfd->fd     = fd;
+  ConnTable[fd].pfd->events = POLLIN;
   ConnTable[fd].state = SM_INIT;
 
   // Actually run the init transaction.  If it succeeds, transition to the next
@@ -388,80 +438,92 @@ int servServer(ConnState* connstate) {
 |                               Server Functions                               |
 \******************************************************************************/
 int ServerInit(int port) {
-  struct sockaddr_in sa = (struct sockaddr_in){0};
+  struct sockaddr_in sa = (struct sockaddr_in) { 0 };
   int sockfd = -1;
-  if(1>port || 65535<port) return -1;   // illegal port
+  if(1 > port || 65535 < port) return -1;   // illegal port
 
-  sa.sin_family      = AF_INET;
-  sa.sin_port        = htons(port);
+#ifdef _WIN32
+  WORD req = MAKEWORD(2, 2);
+  WSADATA wsadata = {0};
+  int err = WSAStartup(req, &wsadata);
+  if(err) return -1;
+#endif
+  sa.sin_family = AF_INET;
+  sa.sin_port = htons(port);
   sa.sin_addr.s_addr = INADDR_ANY;      // bind to all available
-  if(-1==(sockfd=socket(PF_INET, SOCK_STREAM, IPPROTO_IP))) return -2;
-  if(-1==bind(sockfd, &sa, sizeof(sa)))                     return -3;
-  if(-1==listen(sockfd, LISTEN_BACKLOG))                    return -4;
+  if(BADSOCK == (sockfd = socket(PF_INET, SOCK_STREAM, IPPROTO_IP)) ||
+     BADSOCK == bind(sockfd, &sa, sizeof(sa))                       ||
+     BADSOCK == listen(sockfd, LISTEN_BACKLOG)) {
+#ifdef _WIN32
+    errno = WSAGetLastError();
+#endif
+    return -1;
+  }
 
-  // We're listening.  Now initialize ConnTable and PollTable.
-  for(int i=0; i<MAX_CLIENTS; i++) {
+       // We're listening.  Now initialize ConnTable and PollTable.
+  for(int i = 0; i < MAX_CLIENTS; i++) {
     ConnTable[i].pfd = &PollTable[i];
     ConnTable[i].pfd->fd = -1;
-    ConnTable[i].pfd->events = POLLIN|POLLHUP; // ignored unless fd is positive
+    ConnTable[i].pfd->events = 0;
+    ConnTable[i].name = NULL;
+    ConnTable[i].arg  = NULL;
+    ConnTable[i].arg_len = 0;
   }
+
+  // Setup the listening connection state
+  ConnTable[sockfd].pfd->fd = sockfd;
+  ConnTable[sockfd].pfd->events = POLLIN;
+  ConnTable[sockfd].state = SM_SERV;
 
   return sockfd;
 }
 
-int ServerMainLoop(int listen_fd) {
+int ServerMainLoop() {
   // Implements the main loop.  Waits until a socket is ready.  If input, then
   // use Talkative lookup to determine whether to recv() off the socket (this
   // is a kludge to let SM_SERV in the same loop without a special case).  Check
   // msg for valid state (if msg err or invalid state, hangup).  Finally, use 
   // msg state to run state handler on connection, updating connection state.
-  ConnMsg msg = {0};
+  ConnMsg msg = { 0 };
   SMTrans trans;
   int n = -1;
-  LogMe(0,"Listening for new connections...");
+  LogMe(0, "Listening for new connections...");
 
-  // Setup the listening connection state
-  ConnTable[listen_fd].pfd->fd     = listen_fd;
-  ConnTable[listen_fd].pfd->events = POLLIN;
-  ConnTable[listen_fd].state       = SM_SERV;
-
-  while((n=poll(PollTable, MAX_CLIENTS, -1))) {
-    if(-1==n && EINTR == errno) continue;
-    else if(-1==n)              return -1;
+  while((n = poll(PollTable, MAX_CLIENTS, -1))) {
+    if(-1 == n && EINTR == errno) continue;
+    else if(-1 == n)              return -1;
 
     // Note double exit criteria: most of the time we will have only one socket
     // ready, and it will be low-numbered.  Large-scale solution would employ a
-    // different polling mechanism.
-    for(int fd=0; fd<MAX_CLIENTS && n>0; fd++) {
-      if(!PollTable[fd].revents) continue;   // Skip dormant sockets
-      n--;                                   // Not skipped, so count down
+    // different polling mechanism.  Ignore STDIO
+    for(int fd = 3; fd < MAX_CLIENTS && n>0; fd++) {
+      if(!(PollTable[fd].revents & PollTable[fd].events))
+        continue; //Skip
 
+      n--; // Not skipped, count down
       LogMe(0, "[%d](%s):", fd, strconn(&ConnTable[fd]));
-      if(POLLHUP&PollTable[fd].revents) {
-        LogMe(1, "Client hung up");
-        ConnTable[fd].state = SM_ERR;
-      } else if(!POLLIN&PollTable[fd].revents) {
-        LogMe(1, "Unexpected socket state.  Disconnecting client.");
-        ConnTable[fd].state = SM_ERR;
+      if(!(POLLIN & PollTable[fd].revents)) {
+         LogMe(1, "Unexpected socket state.  Disconnecting client.");
+         ConnTable[fd].state = SM_ERR;
       }
 
       // If this is a talkative state, we can get a message from the client.
-      if( Talkative[ConnTable[fd].state] &&
-          GetMsg(fd, &msg)               &&
-          IsInvalidState(msg.type,ConnTable[fd].state)) {
+      if(Talkative[ConnTable[fd].state] &&
+         GetMsg(fd, &msg) &&
+         IsInvalidState(msg.type, ConnTable[fd].state)) {
 
         LogMe(1, "Error or close.  Hanging up on client.");
         ConnTable[fd].state = SM_ERR;
       }
 
       msg_count++;
-      ConnTable[fd].arg     = msg.msg;
+      ConnTable[fd].arg = msg.msg;
       ConnTable[fd].arg_len = msg.len;
       do {
         trans = ConnMachine[ConnTable[fd].state](&ConnTable[fd]);
         ConnTable[fd].state = Transitions[ConnTable[fd].state][trans];
         if(msg.msg) free(msg.msg);
-        msg.msg           = NULL;
+        msg.msg = NULL;
         ConnTable[fd].arg = NULL;
       } while(Immediate[ConnTable[fd].state]);
     }
@@ -472,25 +534,28 @@ int ServerMainLoop(int listen_fd) {
 /******************************************************************************\
 |                                 Entry Point                                  |
 \******************************************************************************/
+// Note that we leave cleanup for one-time objects, such as the listen socket,
+// to the OS through exit()
 int main(int argc, char** argv) {
   char file[] = "messages.log";
-  int port    = 5555;
-  int rc = -1, sfd = -1;
-  if(argc>1) {
+  int port = 5555;
+  LogMe(0, "I'm up.");
+  if(argc > 1) {
     int tmp_port = atoll(argv[1]);
-    if(1>tmp_port || 65535<tmp_port) {
+    if(1 > tmp_port || 65535 < tmp_port) {
       LogMe(0, "Port must be a positive integer less than 65535");
       return -1;
     }
     port = tmp_port;
   }
 
-  if(0>(sfd=ServerInit(port))) {
+  if(0 > ServerInit(port)) {
     LogMe(0, "Could not bind to port %d because %s.", port, strerror(errno));
     return -1;
-  } else if(0>(fd_message=FileInit(file))) {
+  }
+  else if(0 > (fd_message = FileInit(file))) {
     LogMe(0, "Could not open file %s because %s", file, strerror(errno));
     return -1;
   }
-  return ServerMainLoop(sfd);
+  return ServerMainLoop();
 }
