@@ -20,9 +20,6 @@ int FileInit(char* file) {
   return open(file, O_WRONLY|O_APPEND|O_CREAT, 0644);
 }
 
-// GCC has the format-printf __attribute__, which allows variadic functions to
-// have compile-time printf-style type checks.  Never figured out whether the MS
-// compiler has something similar,
 void LogMe(int depth, const char *fmt, ...) {
   va_list arg;
   if(depth) printf("%*s", 4*depth, "");
@@ -30,6 +27,28 @@ void LogMe(int depth, const char *fmt, ...) {
   vprintf(fmt, arg);
   printf("\n");
   va_end(arg);
+}
+
+char SafeRecv(int fd, void* buf, unsigned int len) {
+  // Returns 0 if exactly len bytes were extracted from the socket, otherwise
+  // returns 1 (e.g., hangup, error, or fewer bytes)
+  int recvd = 0, rv = 0;  // total received, last return value
+  while(0<len-recvd) {
+    recvd+=(rv=recv(fd, buf+recvd, len-recvd, 0));
+    if(-1 == rv && EINTR == errno) continue;     // retry if interrupted
+    else if(0 >= rv)               return 1;     // hangup or error
+  }
+  return 0;
+}
+
+char SafeWrite(int fd, char* buf, unsigned int len) {
+  int wrote = 0, rv = 0;  // total written, last return value
+  while(0<len-wrote) {
+    wrote+=(rv=write(fd, buf+wrote, len-wrote));
+    if(-1 == rv && EINTR == errno) continue;
+    else if(0 >= rv)               return 1;
+  }
+  return 0;
 }
 
 
@@ -65,28 +84,51 @@ int errClient(ConnState*);
 
 /******************************************************************************\
 |                                State Machine                                 |
-\******************************************************************************/
-// This uses X-macros to ensure the state and enum definitions are synchronized
-// at definition-time.  C99 designated initializers cover much of the same
-// surface, but I still prefer X-macros for their extensibility.
+\***************************************************************************** /
+This is a state-machine based solution, so this section defines the most
+critical parts of the application.
+
+Instead of defining a state-to-state transition matrix, since most states have a
+logical "next" state, I define a state-to-transition_type matrix.  SM_MLOG,
+SM_SERV are steady-states. The SM_ERR and SM_TERM states are sinks,returning the
+connection back to unused.
+
+Note that while SM_INIT is steady, there is to init executor--a connection must
+be lifted to SM_NAME by the server at connect-time.  This might feel weird,
+unless you've been haunted by a desire for a connection-open handler in a
+previous protocol implementation.
+
+In particular:
+  ConnState - per-connection metadata.  Indexed by file descriptor (incl listen)
+  PollTable - array of pollfd for poll().  fd = -1 when ignored ("init state")
+  ConnMachine - array of handler functions for the connection states
+  SMState - state enum
+  SMTrans - state transition enum
+  Transitions - given a state and a transition type, return the output state
+  Immediate, Talkative, Lightweight - state attributes
+*/
 #define MAX_CLIENTS      64    // Easy to make higher
 #define BUF_MAX        4096
 #define LISTEN_BACKLOG 1024    // max length of listen backlog
 unsigned long msg_count = 0;   // running total of messages serviced
 int fd_message = -1;           // file descriptor for message file
 
-#define EXPAND_ENUM(a,b,c,d) a,
-#define EXPAND_FUNC(a,b,c,d) b,
-#define EXPAND_TRAN(a,b,c,d) {a, c, SM_TERM, SM_ERR},
-#define EXPAND_NAME(a,b,c,d) #d ,
+// Define state transitions with X-macro
+#define EXPAND_ENUM(a,b,c,d,e,f,g) a,
+#define EXPAND_FUNC(a,b,c,d,e,f,g) b,
+#define EXPAND_TRAN(a,b,c,d,e,f,g) {a, c, SM_TERM, SM_ERR},
+#define EXPAND_NAME(a,b,c,d,e,f,g) #d ,
+#define EXPAND_IMMD(a,b,c,d,e,f,g) e,
+#define EXPAND_TALK(a,b,c,d,e,f,g) f,
+#define EXPAND_LTWT(a,b,c,d,e,f,g) g,
 #define STATE_TABLE(X) \
-  X(SM_INIT, initClient, SM_NAME, Init) \
-  X(SM_NAME, nameClient, SM_AUTH, Name) \
-  X(SM_AUTH, authClient, SM_MLOG, Pass) \
-  X(SM_MLOG, mlogClient, SM_MLOG, Msg) \
-  X(SM_TERM, termClient, SM_INIT, Term) \
-  X(SM_SERV, servServer, SM_SERV, Serv) \
-  X(SM_ERR,  errClient,  SM_ERR,  Error)
+  X(SM_INIT, initClient, SM_NAME, Init,  0, 0, 0) \
+  X(SM_NAME, nameClient, SM_AUTH, Name,  0, 1, 0) \
+  X(SM_AUTH, authClient, SM_MLOG, Pass,  0, 1, 0) \
+  X(SM_MLOG, mlogClient, SM_MLOG, Msg,   0, 1, 0) \
+  X(SM_TERM, termClient, SM_INIT, Term,  0, 0, 0) \
+  X(SM_SERV, servServer, SM_SERV, Serv,  0, 0, 0) \
+  X(SM_ERR,  errClient,  SM_INIT, Error, 1, 0, 0)
 
 // State handlers
 int(* ConnMachine[])(ConnState*) = {
@@ -109,17 +151,38 @@ typedef enum SMTrans {
 } SMTrans;
 
 // Transition matrix
-int Transitions[][SMT_LEN] = {
+const int Transitions[][SMT_LEN] = {
   STATE_TABLE(EXPAND_TRAN)
 };
 
 // State names
-char* StateNames[] = {
+const char* StateNames[] = {
   STATE_TABLE(EXPAND_NAME)
 };
 const char* strconn(ConnState* connstate) {
   return StateNames[connstate->state];
 }
+
+// Immediate states
+// These are states which must be computed immediately.  It is strongly assumed
+// that the state machine cannot enter an unbreakable cycle of immediate states.
+const char Immediate[] = {
+  STATE_TABLE(EXPAND_IMMD)
+};
+
+// Talkative states
+// These are states which are expected to receive a message from the client.
+// This is important because accepting a connection does not drain the recv()
+// buffer.
+const char Talkative[] = {
+  STATE_TABLE(EXPAND_TALK)
+};
+
+// Lightweight states
+// These are states for which the message does not have a payload.
+const char Lightweight[] = {
+  STATE_TABLE(EXPAND_LTWT)
+};
 
 // Lookup connection state by file descriptor.  In a full-featured application,
 // this is undesirable because we may use file descriptors for other purposes
@@ -133,13 +196,10 @@ struct pollfd PollTable[MAX_CLIENTS] = {0};
 \******************************************************************************/
 #define MSG_OK(fd)  send(fd, &(int){0},  1, MSG_NOSIGNAL);
 #define MSG_BAD(fd) send(fd, &(int){-1}, 1, MSG_NOSIGNAL);
+
 int GetMsg(int fd, ConnMsg* connmsg) {
   // Drains a given file descriptor, casting the results into a ConnMsg type
-  // strongly assumes:
-  //  * `fd` is set to O_NONBLOCK
-  //  * the socket buffer holds a NEW message
-  int m=0, n=0;
-  SMState msg_state;
+  unsigned char msg_state;
   unsigned short msg_len;
   static char buf[BUF_MAX] = {0};  // Allocating is slower than setting a page!
   memset(buf, 0, BUF_MAX);
@@ -151,46 +211,22 @@ int GetMsg(int fd, ConnMsg* connmsg) {
     connmsg->msg = NULL;
   }
 
-  // Get the type
-  while(EINTR == (n=recv(fd, &msg_state, 1, 0))) ;
-  if(1 != n) goto GETMSG_HANGUP;
+  // Extract necessary parts of the message.  If we experience any issues, then
+  // hangup the connection.
+  if(SafeRecv(fd, &msg_state, 1) ||
+     SafeRecv(fd, &msg_len,   2) ||
+     !msg_len == !Lightweight[msg_state]) goto GETMSG_HANGUP;
 
-  // It's possible that the client has sent the first two bytes of the header,
-  // but not the third.  This would be exceedingly strange on modern systems
-  // so we do not handle that case here.  But we should.
-  while(EINTR == (n=recv(fd, &msg_len, 2, 0))) ;  // could be interrupted mid-sequence...
-  if(2 != n) goto GETMSG_HANGUP;
-
-  // We now know what kind of message we have.  Zero-byte messages should have
-  // zero byte payloads.  Zero-byte messages cannot have zero-byte payloads.
-  // nonzero messages cannot have zero payloads.
-  switch(msg_state) {
-    case SM_TERM:
-    case SM_ERR:
-      if(msg_len) goto GETMSG_HANGUP;
-    default:
-      if(!msg_len) goto GETMSG_HANGUP;
+  // Get the message body (if msg_len is zero, that is no-op)
+  if(0<msg_len) {
+    connmsg->msg = calloc(1, msg_len+1);
+    if(SafeRecv(fd, connmsg->msg, msg_len)) goto GETMSG_HANGUP;
   }
-
-
-  // Begin draining the message component.
-  // TODO: protect against EINTR
-  connmsg->msg = calloc(1, msg_len+1);
-  n = 0;
-  while(0<msg_len - n) {
-    n+=(m=recv(fd, connmsg->msg+n, msg_len-n, 0));
-
-    // Zero-byte return means the client hung up.  Zero-byte on O_NONBLOCK gives
-    // -1.  We do not accept partial messages.
-    if(0==m) goto GETMSG_HANGUP;
-  }
-
   connmsg->type = msg_state;
   connmsg->len  = msg_len;
   return 0;
 
 GETMSG_HANGUP:
-  // We should only be here in the case that the socket operations are in error
   if(connmsg->msg) {
     free(connmsg->msg);
     connmsg->msg = NULL;
@@ -198,6 +234,27 @@ GETMSG_HANGUP:
   connmsg->type = SM_ERR;
   connmsg->len  = 0;
   return -1;
+}
+
+// This basically hardcodes a state-state transition matrix, which we admit
+// since the protocol is so simple.
+char IsInvalidState(unsigned int msgState, unsigned int connState) {
+  if(msgState == connState) return 0;
+  if(msgState == SM_TERM)   return 0;
+  return 1;
+}
+
+void ClientCleanupHelper(ConnState* connstate) {
+  connstate->pfd->fd = -1;
+  connstate->arg_len = 0;
+  if(connstate->arg) {
+    free(connstate->arg);
+    connstate->arg = NULL;
+  }
+  if(connstate->name) {
+    free(connstate->name);
+    connstate->name = NULL;
+  }
 }
 
 
@@ -234,14 +291,11 @@ int initClient(ConnState* connstate) {
 }
 
 int nameClient(ConnState* connstate) {
-  // If we had a list of valid clients, we may choose to do some pre-auth logic
-  // here, such as prepping the password or engaging SSO.  As it stands, we're
-  // just waiting until the auth request hits us.
   if(0==connstate->arg_len || 0==connstate->arg[0]) {
+    // Need non-null name
     return SMT_ERR;
   }
-  if(connstate->name) {
-    // Standard disclaimer.  We're doing this defensively.
+  if(connstate->name) {  // Defensively.
     LogMe(1, "Superfluous name cleanup on %d (%s).", connstate->pfd->fd,
                                                      strconn(connstate));
     free(connstate->name);
@@ -270,24 +324,18 @@ int authClient(ConnState* connstate) {
 }
 
 int mlogClient(ConnState* connstate) {
-  // We write down the message.  It might be reasonable to expect that the
-  // message is ASCII and we ought to do some kind of escaping, but we don't
-  // do that--treat as binary.
   if(0==connstate->arg_len) return SMT_ERR;  // no null messages.
 
-  // Prepare message header.  If the name contains null-bytes, obviously it'll
-  // be truncated here.  We don't care (if it hurts, stop doing it).
+  // Prepare message header. Names may be truncated if they contain nulls. (or
+  // display in a weird way)
   char header[BUF_MAX+5] = {0};
   int n;
   n = snprintf(header, BUF_MAX+5, "[%s]: ", connstate->name);
 
   // Write the header, the msg, and a terminating CR+LF (this is Windows!)
-  while(EINTR==(n=write(fd_message, header, n))) ;
-  if(0>n) goto MLOG_HANGUP;
-  while(EINTR==(n=write(fd_message, connstate->arg, connstate->arg_len))) ;
-  if(0>n) goto MLOG_HANGUP;
-  while(EINTR==(n=write(fd_message, "\r\n", 2))) ;
-  if(0>n) goto MLOG_HANGUP;
+  if(SafeWrite(fd_message, header, n)                          ||
+     SafeWrite(fd_message, connstate->arg, connstate->arg_len) ||
+     SafeWrite(fd_message, "\r\n", 2)) goto MLOG_HANGUP;
 
   // Everything is fine.  Let the client know.
   MSG_OK(connstate->pfd->fd);
@@ -295,22 +343,7 @@ int mlogClient(ConnState* connstate) {
 
 
 MLOG_HANGUP:
-  // We hangup on the client to let them know that something went wrong on this
-  // end and we can no longer service their messages.
   return SMT_ERR;
-}
-
-void ClientCleanupHelper(ConnState* connstate) {
-  connstate->pfd->fd = -1;
-  connstate->arg_len = 0;
-  if(connstate->arg) {
-    free(connstate->arg);
-    connstate->arg = NULL;
-  }
-  if(connstate->name) {
-    free(connstate->name);
-    connstate->name = NULL;
-  }
 }
 
 int termClient(ConnState* connstate) {
@@ -329,22 +362,6 @@ int errClient(ConnState* connstate) {
 }
 
 int servServer(ConnState* connstate) {
-  // Accepts a connection and promotes it to pending state in ConnTable.
-  // Note that the client implementation shouldn't create multiple connections,
-  // but there is nothing stopping a rogue client from doing so.  The common
-  // defense would be to stash and check addr, but we do not do this.  We could
-  // also throttle connections at auth-time based on name and a max_connections
-  // concept, but this solution is omitted here as well.
-  //
-  // Moreover, the server should only arrive here when the connection state is
-  // SM_SERV.  This state cannot be achieved normally--it is a special state
-  // designating listen-type sockets (currently only one).  We'll detect the
-  // error and log it, but provide no means of recovery.
-  //
-  // Finally, because of the way we use file descriptors as indices, we need to
-  // dump any connections that are numbered too high.  File descriptors are
-  // allocated by the kernel from lowest-available-first, so we shouldn't have
-  // huge gaps.
   int fd = -1, flags = 0;
   SMTrans trans;
   fd = accept(connstate->pfd->fd, NULL, NULL);
@@ -393,6 +410,11 @@ int ServerInit(int port) {
 }
 
 int ServerMainLoop(int listen_fd) {
+  // Implements the main loop.  Waits until a socket is ready.  If input, then
+  // use Talkative lookup to determine whether to recv() off the socket (this
+  // is a kludge to let SM_SERV in the same loop without a special case).  Check
+  // msg for valid state (if msg err or invalid state, hangup).  Finally, use 
+  // msg state to run state handler on connection, updating connection state.
   ConnMsg msg = {0};
   SMTrans trans;
   int n = -1;
@@ -404,72 +426,44 @@ int ServerMainLoop(int listen_fd) {
   ConnTable[listen_fd].state       = SM_SERV;
 
   while((n=poll(PollTable, MAX_CLIENTS, -1))) {
-    if(-1==n) switch(errno) {
-      case EINTR:
-        continue;
-      case EFAULT:
-      case EINVAL:
-      case ENOMEM:
-        return -1;
-    }
+    if(-1==n && EINTR == errno) continue;
+    else if(-1==n)              return -1;
 
-    for(int fd=0; fd<MAX_CLIENTS; fd++) {
-      if(POLLIN&PollTable[fd].revents) {
-        LogMe(0, "[%d](%s):", fd, strconn(&ConnTable[fd]));
+    // Note double exit criteria: most of the time we will have only one socket
+    // ready, and it will be low-numbered.  Large-scale solution would employ a
+    // different polling mechanism.
+    for(int fd=0; fd<MAX_CLIENTS && n>0; fd++) {
+      if(!PollTable[fd].revents) continue;   // Skip dormant sockets
+      n--;                                   // Not skipped, so count down
 
-        // Proceed to read from the file descriptor.  Note that we early-exit
-        // from the first if() when it's a server listening FD, since we do not
-        // want to try to recv() the connection request
-        if(SM_SERV == ConnTable[fd].state) {
-          // We special-case the server socket(s).
-          trans = ConnMachine[ConnTable[fd].state](&ConnTable[fd]);
-          ConnTable[fd].state = Transitions[ConnTable[fd].state][trans];
-        } else if(GetMsg(fd, &msg)) {
-          // Error was thrown in GetMsg!  Let the client know that there was
-          // an error and disconnect.
-          LogMe(1, "Error deserializing message (or client hung up)");
-          ConnTable[fd].state = SM_ERR;
-        } else if(msg.type != ConnTable[fd].state) {
-          // This is an illegal transaction!  Let the client know that there
-          // was an error and disconnect.
-          LogMe(1, "Client desynchronized (%s)", StateNames[msg.type]);
-          ConnTable[fd].state = SM_ERR;
-        } else {
-          // We're fine, process the transaction.
-          if(msg.len) {
-            LogMe(1, "value: %s", msg.msg);
-          } else {
-            LogMe(1, "Message deserialized.  Processing transaction.");
-          }
-          msg_count++;
-          ConnTable[fd].arg     = msg.msg;
-          ConnTable[fd].arg_len = msg.len;
-          trans = ConnMachine[ConnTable[fd].state](&ConnTable[fd]);
-          ConnTable[fd].state = Transitions[ConnTable[fd].state][trans];
-        }
+      LogMe(0, "[%d](%s):", fd, strconn(&ConnTable[fd]));
+      if(POLLHUP&PollTable[fd].revents) {
+        LogMe(1, "Client hung up");
+        ConnTable[fd].state = SM_ERR;
+      } else if(!POLLIN&PollTable[fd].revents) {
+        LogMe(1, "Unexpected socket state.  Disconnecting client.");
+        ConnTable[fd].state = SM_ERR;
+      }
 
-        // We're done with the msg/arg, so throw it away.
+      // If this is a talkative state, we can get a message from the client.
+      if( Talkative[ConnTable[fd].state] &&
+          GetMsg(fd, &msg)               &&
+          IsInvalidState(msg.type,ConnTable[fd].state)) {
+
+        LogMe(1, "Error or close.  Hanging up on client.");
+        ConnTable[fd].state = SM_ERR;
+      }
+
+      msg_count++;
+      ConnTable[fd].arg     = msg.msg;
+      ConnTable[fd].arg_len = msg.len;
+      do {
+        trans = ConnMachine[ConnTable[fd].state](&ConnTable[fd]);
+        ConnTable[fd].state = Transitions[ConnTable[fd].state][trans];
         if(msg.msg) free(msg.msg);
         msg.msg           = NULL;
         ConnTable[fd].arg = NULL;
-
-        // If the state type is SM_TERM or SM_ERR, then we need to process that
-        // before returning to the main loop
-        // ASSERT:  these two transactions will close the connection and clean
-        //          up the ConnState object (e.g., return it to an init state)
-        if(SM_ERR == ConnTable[fd].state || SM_TERM == ConnTable[fd].state) {
-          LogMe(1, "Encountered an error.  Closing.");
-          ConnMachine[ConnTable[fd].state](&ConnTable[fd]);
-        }
-      } else if(POLLHUP&PollTable[fd].revents) {
-        LogMe(0, "[%d](%s): HANGUP", fd, strconn(&ConnTable[fd]));
-        errClient(&ConnTable[fd]);
-        ConnTable[fd].state = SM_INIT;
-      } else if(PollTable[fd].revents) {
-        LogMe(0, "[%d](%s): Unexpected", fd, strconn(&ConnTable[fd]));
-        errClient(&ConnTable[fd]);
-        ConnTable[fd].state = SM_INIT;
-      }
+      } while(Immediate[ConnTable[fd].state]);
     }
   }
 }
@@ -479,38 +473,24 @@ int ServerMainLoop(int listen_fd) {
 |                                 Entry Point                                  |
 \******************************************************************************/
 int main(int argc, char** argv) {
-  int port                  = default_port;
-  int rc                    = -1;
-  int sfd                   = -1;  // file descriptor for sockets
-  const int  default_port   = 5555;
-  const char default_file[] = "messages.log";
+  char file[] = "messages.log";
+  int port    = 5555;
+  int rc = -1, sfd = -1;
   if(argc>1) {
     int tmp_port = atoll(argv[1]);
     if(1>tmp_port || 65535<tmp_port) {
-      printf("Port must be a positive integer less than 65535\n");
+      LogMe(0, "Port must be a positive integer less than 65535");
       return -1;
     }
     port = tmp_port;
   }
 
-  // We don't clean up after the errors below, since exit() handles that for us
   if(0>(sfd=ServerInit(port))) {
-    printf("Could not bind to port %d because %s.\n", port, strerror(errno));
+    LogMe(0, "Could not bind to port %d because %s.", port, strerror(errno));
+    return -1;
+  } else if(0>(fd_message=FileInit(file))) {
+    LogMe(0, "Could not open file %s because %s", file, strerror(errno));
     return -1;
   }
-  else if(0>(fd_message=FileInit(default_file))) {
-    // Can't really log this, so we just yell.
-    printf("Could not open file %s because %s\n", default_file, strerror(errno));
-    return -1;
-  } else if((rc=ServerMainLoop(sfd))) {
-    printf("Error in main loop: %s\n", strerror(errno));
-    return -1;
-  }
-
-  // This won't be reachable until the server is allowed to shut down
-  // gracefully.  This is not implemented because I don't want to deal with
-  // learning how to switch Windows consoles to raw input in the correct way in
-  // order to hook it up to the poll() loop (I don't want to use timeouts...)
-  printf("Server closing.  I served %ld transactions!  Goodbye.\n", msg_count);
-
+  return ServerMainLoop(sfd);
 }
