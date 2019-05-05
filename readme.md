@@ -1,7 +1,10 @@
 ### Coding Exercise (Implementation)
 
 This program implements a simple C server and corresponding Python client for
-serializing messages to a file on the server machine.
+serializing messages to a file on the server machine.  Builds are passing on:
+ * Windows, MSVC (32 and 64-bit; tested on Win10)
+ * Windows, MinGW (64-bit)
+ * Linux,   GCC-8 (64-bit)
 
 
 ## Server Directions 
@@ -87,44 +90,39 @@ Finally, note that passwords are very weak.  The parity of the ordinal value of
 the first password character is all that matters.
 
 
+## Compatibility Notes
 
-## Design Considerations
+I went ahead and wrote this to be compatible with both Windows and Linux.  I
+admit that although Windows is working, I did neglect to consider a few
+differences in the socket API between the two--notably, whereas POSIX was
+forced into signed-int sockets many years ago, Windows correctly withholds (~0)
+as an error state and otherwise uses unsigned integers.  This is smoothed over
+where it is really relevant.
 
-This pattern is probably overkill for the nature of the exercise, but I didn't
-feel that a quick-and-dirty solution would adequately represent my skills or
-experiences.  I hope the team finds the additional burden of parsing through a
-more complex solution worthwhile.
-
-From an ergonomics standpoint, this protocol is a bit challenging to use.  This
-is intentional, as it provided a simple way of assuring that a malicious client
-couldn't execute arbitrary transactions.  In particular, I wanted to protect
-against:
- * Message deserialization buffer overflows
- * Incomplete constraint of protocol state-machine
-
-Moreover, whenever you implement a state machine in C, it's really easy to mix
-up states-as-indices and their corresponding functions or transitions, so I pull
-out X-macros to make it easier to eyeball that relationship.
-
-The design of the protocol and the GetMsg() interface are intended to prevent
-trivial buffer-overflow issues.  I pull the length of the message right off the
-wire.  Of course, a malicious user could pad the message with additional bytes,
-which will be at the top of the buffer the next time I process a transaction,
-but the server will only interpret it in terms of the next state.
-
-I don't know that this solution will withstand really intense fuzzing or
-analysis, but I certainly tried to make it durable in that sense.
+Also, whereas POSIX grants file descriptors from the bottom-up, Windows does
+not necessarily follow this tradition.  Accordingly, if I misunderstood the
+behavior of FD_SETSIZE on Windows, then under load it may erroneously hangup
+on connection requests (I understand the default limit to be 0-8192).  The
+simple solution would be to add a level of indirection between the FDs and
+the globals hanging onto connection state, which I did not do for simplicity.
 
 
-Finally, one might note that I do something strange with forcing the recv()
-sockets into nonblocking mode.  When you're doing point-to-point IPC, this is
-generally unnecessary, but in my experience different proxy solutions can buffer
-TCP/IP sockets differently.  Notably, I've seen applications that do things like
-msglen = recv(fd, buf, BIGLEN) break under proxy if the client has two
-transactions queued and the server expects to recv() a single transaction at a
-time.
+## Editorial 
 
-There is much less to be said about the client, as the server leaves the client
-code relatively trivial.  I had considered writing a C client and implementing
-the Python client that way, but that would have completely (instead of just
-mostly) obviated the client side of things
+In this code I use conventions (e.g., `if(10>(n+(m=syscall()))) DoThing();`)
+for the sake of readability/brevity which are not advisable when many hands are
+working on a given project.  I have tried to structure the code in a way that
+makes it easy to read as a single file, but it should be relatively easy to
+see how it might be refactored into a proper project.  I intended this as a
+convenience to the reviewers--hopefully it doesn't defeat that goal.
+
+Overall, I hope the team will find the this approach to be a little beyond the
+scope of the exercise, but thoughtful in its communication of the author's
+experience with network code (albeit on Linux quite a bit more than Windows). I
+think the state machine approach very elegantly constrains the behavior of the
+server, even in substantially more sophisticated protocols.  Although I do
+probably overuse the technique here, I also believe the use of X-macros defend
+well against many easy-to-introduce state desynchronization bugs.  Socket-level
+details are a bit fluffy--I'm not using fork() on Linux, and on Windows the
+poll()/recv()/send() primitives are barely correct, so the whole EINTR handling
+hints at a category of issues not completely relevant for this exercise.
