@@ -66,12 +66,13 @@ class client(object):
     self.sfd.close()
 
   # Python will close the sockets on destruction, so no need to handle that.
-  def __init__(self, name, password, host='localhost', port=5555):
+  def __init__(self, name, password, host='localhost', port=5555, defer=False):
     self.name = name
     self.password = password
     self.host = host
     self.ip = socket.gethostbyname(host)
     self.port = port
     self._connected = False
-    self.connect(name, password)
+    if not self.defer:
+      self.connect(name, password)
 
