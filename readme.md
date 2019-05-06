@@ -18,7 +18,8 @@ Linux.
 
 ## Server Directions 
 
-./server [port]
+`./server [port]`
+
 port is an optional parameter (default: 5555), the desired TCP/IP port to bind
 the server to.  It will bind on all available interfaces.
 
