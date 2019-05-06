@@ -358,13 +358,18 @@ int authClient(ConnState * connstate) {
   // Uh.  Well, we could manage a list of users and their passwords, or we could
   // just check whether the first character is odd.
   if(0 == connstate->arg_len) {
-    // Can't have null passwords
+    LogMe(1, "Given empty password");
     return SMT_ERR;
   }
 
-  if(!(connstate->arg[0] & 1)) return SMT_ERR;       // nope!
-  MSG_OK(connstate->pfd->fd);
-  return connstate->arg[0] & 1 ? SMT_NEXT : SM_ERR;
+  if(!(connstate->arg[0] & 1)) {
+    LogMe(1, "Invalid password");
+    return SMT_ERR;       // nope!
+  } else {
+    LogMe(1, "Client connected successfully");
+    MSG_OK(connstate->pfd->fd);
+  }
+  return SMT_NEXT;
 }
 
 int mlogClient(ConnState * connstate) {
@@ -507,19 +512,24 @@ int ServerMainLoop() {
          ConnTable[fd].state = SM_ERR;
       }
 
-      // If this is a talkative state, we can get a message from the client.
-      if(Talkative[ConnTable[fd].state] &&
-         GetMsg(fd, &msg) &&
-         IsInvalidState(msg.type, ConnTable[fd].state)) {
 
-        LogMe(1, "Error or close.  Hanging up on client.");
-        ConnTable[fd].state = SM_ERR;
-      }
-
-      msg_count++;
-      ConnTable[fd].arg = msg.msg;
-      ConnTable[fd].arg_len = msg.len;
+      // Evaluate until the current state is no longer Immediate
       do {
+        // If this is a talkative state, we can get a message from the client.
+        if(Talkative[ConnTable[fd].state] &&
+           GetMsg(fd, &msg) &&
+           IsInvalidState(msg.type, ConnTable[fd].state)) {
+
+          LogMe(1, "Error or close.  Hanging up on client.");
+          ConnTable[fd].state = SM_ERR;
+        }
+
+        if(Talkative[ConnTable[fd].state])
+          LogMe(1, "Got message: %s", msg.msg);
+
+        msg_count++;
+        ConnTable[fd].arg = msg.msg;
+        ConnTable[fd].arg_len = msg.len;
         trans = ConnMachine[ConnTable[fd].state](&ConnTable[fd]);
         ConnTable[fd].state = Transitions[ConnTable[fd].state][trans];
         if(msg.msg) free(msg.msg);

@@ -16,8 +16,7 @@ class client(object):
     self.name = self.name if name is None else name
     self.password = self.password if password is None else password
     try:
-      self.sfd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-      self.sfd.connect((self.ip, self.port))
+      self._getsock()
       self._send_name()
       self._send_pass()
       self._connected = True
@@ -28,17 +27,24 @@ class client(object):
       self.sfd.close()
       raise
 
+  def _getsock(self):
+    if self._connected:
+      raise ClientError("Already connected.")
+      return
+    self.sfd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    self.sfd.connect((self.ip, self.port))
+
   def _send_name(self):
-    self.sfd.send(b'\1')
-    self.sfd.send(struct.pack("<H",len(self.name)))
-    self.sfd.send(self.name.encode())
+    self.sfd.send(bytearray(b'\1') +
+                  struct.pack("<H", len(self.name)) +
+                  self.name.encode())
     if struct.unpack("<B",self.sfd.recv(1))[0]:
       raise ClientError("Server rejected NAME transaction")
 
   def _send_pass(self):
-    self.sfd.send(b'\2')
-    self.sfd.send(struct.pack("<H",len(self.password)))
-    self.sfd.send(self.password.encode())
+    self.sfd.send(bytearray(b'\2') +
+                  struct.pack("<H", len(self.password)) +
+                  self.password.encode())
     if struct.unpack("<B",self.sfd.recv(1))[0]:
       raise ClientError("Server rejected PASS transaction")
 
@@ -50,26 +56,30 @@ class client(object):
     """
     if not self._connected:
       raise MsgError("Must be connected.")
+      return
     try:
-      self.sfd.send(b'\3')
-      self.sfd.send(struct.pack("<H",len(msg)))
-      self.sfd.send(msg.encode())
+      self.sfd.send(bytearray(b'\3') +
+                    struct.pack("<H", len(msg)) +
+                    msg.encode())
       if struct.unpack("<B",self.sfd.recv(1))[0]:
         raise ClientError("Server rejected MSG transaction")
     except:
-      self.sfd.disconnect()
+      self.sfd.close()
 
   def disconnect(self):
     self._connected = False
-    self.sfd.send(b'\4')
-    self.sfd.recv(1)
-    self.sfd.close()
+    try:
+      self.sfd.send(b'\4')
+      self.sfd.recv(1)
+      self.sfd.close()
+    except:
+      pass
 
-  # Python will close the sockets on destruction, so no need to handle that.
   def __init__(self, name, password, host='localhost', port=5555, defer=False):
     self.name = name
     self.password = password
     self.host = host
+    self.defer = defer
     self.ip = socket.gethostbyname(host)
     self.port = port
     self._connected = False

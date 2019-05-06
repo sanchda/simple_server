@@ -7,6 +7,15 @@ serializing messages to a file on the server machine.  Builds are passing on:
  * Linux,   GCC-8 (64-bit)
 
 
+## Building and Builds
+
+For MSVC, .vcxproj files are attached.
+For Linux, ./build.sh is provided.
+
+Prebuilt binaries are available in release/w64 for Windows and release/l64 for
+Linux.
+
+
 ## Server Directions 
 
 ./server [port]
@@ -27,9 +36,9 @@ through a state machine with the following transition diagram:
 At every state, the client must acknowledge that they understand the server
 state machine by specifying the current state.  This is the first byte of every
 transaction. Transaction payloads are preceeded by a two-byte length parameter
-(not in network order, for simplicity!) which communicates the payload length in
-bytes.  Payloads are interpreted relative to the current state, so the current
-design has no need to consider payload types.
+which communicates the payload length in bytes.  Payloads are interpreted
+relative to the current state, so the current design has no need to consider
+payload types.
 
 The server will respond with a single-byte indicating whether the transition
 failed (-1) or succeeded (0).  It doesn't really matter, but close transactions
@@ -52,15 +61,23 @@ transaction diagnostics are printed to stdout.
 
 ## Client Directions 
 
-The client implements the sending side of the protocol discussed above.  Usage
-is pretty simple.  Initializing a client object requires setting the username
-and password:
+Client code is in client/client.py.
+
+The client implements the sending side of the protocol discussed above.
+Initializing a client object requires setting the username and password, which
+will also connect to the server.
 
 ```python
 import client
 
 myclient = client.client("MyUser", "MyPassword")
 
+```
+
+To defer connection, use `defer`:
+```python
+myclient = client.client("MyUser", "MyPassword", defer=True)
+myclient.connect()
 ```
 
 Note that the client transmits the username and password as ASCII--binary data
@@ -72,8 +89,9 @@ Once a client has been connected, it is free to submit messages:
 myclient.msg("This is my message.  It is modestly important.")
 myclient.msg("I can send multiple messages without reconnecting.")
 
-# Oops, gotta go
+# Oops, gotta go and change my name
 myclient.disconnect()
+myclient.name = "MyOtherUser"
 
 # OK, I'm back now.
 myclient.connect()
@@ -87,7 +105,18 @@ bar = client.client("Second User", "E")
 ```
 
 Finally, note that passwords are very weak.  The parity of the ordinal value of
-the first password character is all that matters.
+the first password character is all that matters --e.g., "A" is valid, but
+"BAAA" is not.
+
+
+## Tests
+
+A few unit tests are in `client/unit_tests.py`.  These are implemented over the
+unittest module and can be executed (e.g., from the CWD) with:
+
+```python
+python3 -m unittest unit_tests.py
+```
 
 
 ## Compatibility Notes
