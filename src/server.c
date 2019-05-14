@@ -45,9 +45,10 @@ char SafeRecv(int fd, unsigned char* buf, unsigned int len) {
   // returns 1 (e.g., hangup, error, or fewer bytes)
   int recvd = 0, rv = 0;  // total received, last return value
   while(0 < len - recvd) {
-    recvd += (rv = recv(fd, buf + recvd, len - recvd, 0));
+    rv = recv(fd, buf + recvd, len - recvd, 0);
     if(-1 == rv && EINTR == errno) continue;     // retry if interrupted
     else if(0 >= rv)               return 1;     // hangup or error
+    recvd += rv;                                 // no error, so increment cursor
   }
   return 0;
 }
