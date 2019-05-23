@@ -1,4 +1,4 @@
-### Coding Exercise (Implementation)
+### Introduction
 
 This program implements a simple C server and corresponding Python client for
 serializing messages to a file on the server machine.  Builds are passing on:
