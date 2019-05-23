@@ -135,24 +135,3 @@ behavior of FD_SETSIZE on Windows, then under load it may erroneously hangup
 on connection requests (I understand the default limit to be 0-8192).  The
 simple solution would be to add a level of indirection between the FDs and
 the globals hanging onto connection state, which I did not do for simplicity.
-
-
-## Editorial 
-
-In this code I use conventions (e.g., `if(10>(n+(m=syscall()))) DoThing();`)
-for the sake of readability/brevity which are not advisable when many hands are
-working on a given project.  I have tried to structure the code in a way that
-makes it easy to read as a single file, but it should be relatively easy to
-see how it might be refactored into a proper project.  I intended this as a
-convenience to the reviewers--hopefully it doesn't defeat that goal.
-
-Overall, I hope the team will find the this approach to be a little beyond the
-scope of the exercise, but thoughtful in its communication of the author's
-experience with network code (albeit on Linux quite a bit more than Windows). I
-think the state machine approach very elegantly constrains the behavior of the
-server, even in substantially more sophisticated protocols.  Although I do
-probably overuse the technique here, I also believe the use of X-macros defend
-well against many easy-to-introduce state desynchronization bugs.  Socket-level
-details are a bit fluffy--I'm not using fork() on Linux, and on Windows the
-poll()/recv()/send() primitives are barely correct, so the whole EINTR handling
-hints at a category of issues not completely relevant for this exercise.
